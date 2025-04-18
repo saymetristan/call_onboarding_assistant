@@ -202,18 +202,38 @@ fastify.register(async fastifyInstance => {
             try {
               const message = JSON.parse(data);
               
-              // Mostrar mensajes completos para ciertos tipos
+              // No mostrar logs para mensajes de ping excepto uno cada 5 pings
+              if (message.type === "ping") {
+                if (message.ping_event && message.ping_event.event_id % 5 === 0) {
+                  console.log(`[ElevenLabs] Ping ${message.ping_event.event_id}`);
+                }
+                return; // Salir temprano para evitar más procesamiento
+              }
+              
+              // Solo mostrar mensajes completos para tipos importantes
               if (message.type === "error" || 
                   message.type === "user_transcript" || 
                   message.error_event) {
-                console.log("[ElevenLabs] FULL MESSAGE:", JSON.stringify(message));
-              } else {
-                console.log("[ElevenLabs] Raw message:", JSON.stringify(message).substring(0, 200) + "...");
+                console.log(`[ElevenLabs] FULL MESSAGE: ${JSON.stringify(message)}`);
+              } 
+              // Para audio, sólo indicar que se recibió, sin mostrar el contenido
+              else if (message.type === "audio") {
+                console.log(`[ElevenLabs] Recibido audio (${
+                  message.audio?.chunk ? message.audio.chunk.length : 
+                  message.audio_event?.audio_base_64 ? message.audio_event.audio_base_64.length : 0
+                } bytes)`);
+              }
+              // Para otros tipos de mensajes, mostrar una versión corta
+              else if (message.type !== "ping") {
+                const shortMessage = JSON.stringify(message)
+                  .replace(/"audio_base_64":"[^"]+"/g, '"audio_base_64":"[AUDIO_DATA]"')
+                  .substring(0, 100) + "...";
+                console.log(`[ElevenLabs] ${message.type}: ${shortMessage}`);
               }
 
               switch (message.type) {
                 case "conversation_initiation_metadata":
-                  console.log("[ElevenLabs] Received initiation metadata");
+                  console.log("[ElevenLabs] Iniciada conversación");
                   break;
 
                 case "audio":
@@ -255,17 +275,6 @@ fastify.register(async fastifyInstance => {
                   }
                   break;
 
-                case "ping":
-                  if (message.ping_event?.event_id) {
-                    elevenLabsWs.send(
-                      JSON.stringify({
-                        type: "pong",
-                        event_id: message.ping_event.event_id,
-                      })
-                    );
-                  }
-                  break;
-
                 case "agent_response":
                   console.log(
                     `[Twilio] Agent response: ${message.agent_response_event?.agent_response}`
@@ -279,14 +288,14 @@ fastify.register(async fastifyInstance => {
                   break;
 
                 default:
-                  console.log(
-                    `[ElevenLabs] Unhandled message type: ${message.type}`
-                  );
+                  // No mostrar "unhandled message type" para los tipos que sabemos son comunes
+                  if (!["ping", "audio"].includes(message.type)) {
+                    console.log(`[ElevenLabs] Tipo de mensaje no manejado: ${message.type}`);
+                  }
               }
 
-              console.log('[ElevenLabs] Message received type:', message.type);
             } catch (error) {
-              console.error("[ElevenLabs] Error processing message:", error);
+              console.error(`[${new Date().toISOString()}] [ElevenLabs] Error procesando mensaje:`, error);
             }
           });
 
@@ -350,15 +359,24 @@ fastify.register(async fastifyInstance => {
               callSid = msg.start.callSid;
               customParameters = msg.start.customParameters;
               isCallActive = true;
-              console.log(
-                `[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`
-              );
-              console.log("[Twilio] Start parameters:", customParameters);
+              console.log(`[Llamada] Iniciada - ID: ${callSid}`);
+              console.log(`[Llamada] Parámetros: ${JSON.stringify({
+                name: customParameters?.name,
+                phone: customParameters?.phone_number,
+                organization: customParameters?.organization
+              })}`);
               break;
 
             case "media":
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-                // UTILIZAR EXACTAMENTE EL MISMO FORMATO QUE EL EJEMPLO DE ELEVENLABS
+                // Incrementar contador de paquetes
+                audioPacketCount++;
+                
+                // Solo mostrar un log cada 100 paquetes de audio
+                if (audioPacketCount % 100 === 0) {
+                  console.log(`[Audio] Enviados ${audioPacketCount} paquetes de audio`);
+                }
+                
                 const audioMessage = {
                   user_audio_chunk: Buffer.from(
                     msg.media.payload,
@@ -366,15 +384,15 @@ fastify.register(async fastifyInstance => {
                   ).toString("base64"),
                 };
                 
-                // Solo agregar un punto para feedback visual
-                process.stdout.write(".");
+                // Eliminar los puntos por completo
+                // process.stdout.write(".");
                 
                 elevenLabsWs.send(JSON.stringify(audioMessage));
               }
               break;
 
             case "stop":
-              console.log(`[Twilio] Stream ${streamSid} ended`);
+              console.log(`[Llamada] Finalizada - ID: ${callSid}`);
               isCallActive = false;
               
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
